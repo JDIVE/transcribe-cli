@@ -14,6 +14,11 @@ import type {
 
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 export const INPUT_FORMATS = ["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"];
+export const DEFAULT_BATCH_CHUNK_SECONDS = 600;
+export const DEFAULT_BOUNDARY_WINDOW_SECONDS = 45;
+export const DEFAULT_MIN_SILENCE_SECONDS = 0.2;
+export const DEFAULT_SILENCE_THRESHOLD_DB = -35;
+export const SAFE_CHUNK_HEADROOM = 0.92;
 export const ALL_RESPONSE_FORMATS = [
   "json",
   "text",
@@ -29,6 +34,18 @@ export interface AudioInspection {
   durationSeconds?: number;
   formatName?: string;
   bitRate?: number;
+}
+
+export interface SilenceBoundary {
+  start?: number;
+  end: number;
+  duration?: number;
+}
+
+export interface ChunkRange {
+  index: number;
+  startSeconds: number;
+  endSeconds: number;
 }
 
 function runCommand(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -61,6 +78,10 @@ export function commandOnPath(command: string): boolean {
 
 export function createFileStream(path: string) {
   return createReadStream(path);
+}
+
+export function modelSupportsPrompt(model: string): boolean {
+  return model !== "gpt-4o-transcribe-diarize";
 }
 
 export async function ensureAudioFile(path: string): Promise<void> {
@@ -406,6 +427,164 @@ export async function createSpeechWorkingCopy(args: {
   ]);
 }
 
+export async function detectSilenceBoundaries(args: {
+  sourcePath: string;
+  thresholdDb: number;
+  minSilenceSeconds: number;
+}): Promise<SilenceBoundary[]> {
+  if (!commandOnPath("ffmpeg")) {
+    return [];
+  }
+
+  const { stderr } = await runCommand("ffmpeg", [
+    "-hide_banner",
+    "-i",
+    args.sourcePath,
+    "-af",
+    `silencedetect=noise=${args.thresholdDb}dB:d=${args.minSilenceSeconds}`,
+    "-f",
+    "null",
+    "-",
+  ]);
+
+  const boundaries: SilenceBoundary[] = [];
+  let pendingStart: number | undefined;
+
+  for (const line of stderr.split("\n")) {
+    const startMatch = line.match(/silence_start:\s*([0-9.]+)/);
+    if (startMatch) {
+      pendingStart = Number(startMatch[1]);
+      continue;
+    }
+
+    const endMatch = line.match(/silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/);
+    if (endMatch) {
+      boundaries.push({
+        start: pendingStart,
+        end: Number(endMatch[1]),
+        duration: Number(endMatch[2]),
+      });
+      pendingStart = undefined;
+    }
+  }
+
+  return boundaries;
+}
+
+export function estimateSafeChunkSeconds(args: {
+  durationSeconds?: number;
+  sizeBytes: number;
+  preferredSeconds: number;
+}): number {
+  if (!args.durationSeconds || args.durationSeconds <= 0 || args.sizeBytes <= 0) {
+    return args.preferredSeconds;
+  }
+
+  const secondsPerByte = args.durationSeconds / args.sizeBytes;
+  const maxSecondsBySize = Math.floor(MAX_AUDIO_BYTES * SAFE_CHUNK_HEADROOM * secondsPerByte);
+  if (maxSecondsBySize <= 0) {
+    return args.preferredSeconds;
+  }
+  return Math.max(1, Math.min(args.preferredSeconds, maxSecondsBySize));
+}
+
+export function planChunkRanges(args: {
+  durationSeconds: number;
+  targetSeconds: number;
+  maxChunkSeconds: number;
+  boundaryWindowSeconds: number;
+  boundaries: SilenceBoundary[];
+  forceChunk: boolean;
+}): ChunkRange[] {
+  const duration = args.durationSeconds;
+  if (duration <= 0) {
+    return [{ index: 0, startSeconds: 0, endSeconds: 0 }];
+  }
+
+  const chunkRanges: ChunkRange[] = [];
+  const boundaryEnds = args.boundaries
+    .map((boundary) => boundary.end)
+    .filter((value) => value > 0 && value < duration)
+    .sort((left, right) => left - right);
+
+  let cursor = 0;
+  let index = 0;
+  while (cursor < duration) {
+    const remaining = duration - cursor;
+    const mustSplitForSize = remaining > args.maxChunkSeconds;
+    const shouldSplitForTarget = args.forceChunk && remaining > args.targetSeconds * 1.25;
+
+    if (!mustSplitForSize && !shouldSplitForTarget) {
+      chunkRanges.push({
+        index,
+        startSeconds: cursor,
+        endSeconds: duration,
+      });
+      break;
+    }
+
+    const idealEnd = Math.min(cursor + args.targetSeconds, duration);
+    const hardEnd = Math.min(cursor + args.maxChunkSeconds, duration);
+    const earliestEnd = Math.max(cursor + 1, idealEnd - args.boundaryWindowSeconds);
+    const latestEnd = Math.min(hardEnd, idealEnd + args.boundaryWindowSeconds);
+    const candidate = boundaryEnds
+      .filter((value) => value >= earliestEnd && value <= latestEnd)
+      .sort((left, right) => Math.abs(left - idealEnd) - Math.abs(right - idealEnd))[0];
+
+    const endSeconds = candidate || Math.min(hardEnd, idealEnd);
+    chunkRanges.push({
+      index,
+      startSeconds: cursor,
+      endSeconds,
+    });
+    cursor = endSeconds;
+    index += 1;
+  }
+
+  return chunkRanges;
+}
+
+export async function extractAudioChunks(args: {
+  sourcePath: string;
+  ranges: ChunkRange[];
+  outDir: string;
+  sampleRate: number;
+  bitrate: string;
+}): Promise<string[]> {
+  if (!commandOnPath("ffmpeg")) {
+    throw new AppError("missing_ffmpeg", "ffmpeg is required to split audio into chunks.");
+  }
+
+  await mkdir(args.outDir, { recursive: true });
+  const outputs: string[] = [];
+
+  for (const range of args.ranges) {
+    const outputPath = join(args.outDir, `chunk-${String(range.index).padStart(3, "0")}.mp3`);
+    await runCommand("ffmpeg", [
+      "-hide_banner",
+      "-y",
+      "-ss",
+      String(range.startSeconds),
+      "-i",
+      args.sourcePath,
+      "-t",
+      String(Math.max(0.01, range.endSeconds - range.startSeconds)),
+      "-ac",
+      "1",
+      "-ar",
+      String(args.sampleRate),
+      "-c:a",
+      "libmp3lame",
+      "-b:a",
+      args.bitrate,
+      outputPath,
+    ]);
+    outputs.push(outputPath);
+  }
+
+  return outputs;
+}
+
 export async function segmentAudio(args: {
   sourcePath: string;
   outDir: string;
@@ -434,6 +613,28 @@ export async function segmentAudio(args: {
     .filter((entry) => entry.startsWith("chunk-"))
     .sort()
     .map((entry) => join(args.outDir, entry));
+}
+
+export function buildCarryoverPrompt(args: {
+  basePrompt?: string;
+  previousTranscript?: string;
+  model: string;
+}): string | undefined {
+  if (!modelSupportsPrompt(args.model)) {
+    return args.basePrompt;
+  }
+
+  const previous = args.previousTranscript?.trim();
+  if (!previous) {
+    return args.basePrompt;
+  }
+
+  const tail = previous.slice(-900);
+  if (!args.basePrompt) {
+    return `Continue this transcript smoothly from the previous segment.\n\nPrevious transcript context:\n${tail}`;
+  }
+
+  return `${args.basePrompt}\n\nContinue this transcript smoothly from the previous segment.\n\nPrevious transcript context:\n${tail}`;
 }
 
 export function expandHome(path: string): string {

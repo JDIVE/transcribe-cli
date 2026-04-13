@@ -41,11 +41,11 @@ Download the binary for your platform from GitHub Releases and put it on your `P
 
 Release assets are named like:
 
-- `transcribe-cli-v0.1.2-linux-x64-baseline`
-- `transcribe-cli-v0.1.2-linux-arm64`
-- `transcribe-cli-v0.1.2-darwin-x64`
-- `transcribe-cli-v0.1.2-darwin-arm64`
-- `transcribe-cli-v0.1.2-windows-x64-baseline.exe`
+- `transcribe-cli-v0.1.3-linux-x64-baseline`
+- `transcribe-cli-v0.1.3-linux-arm64`
+- `transcribe-cli-v0.1.3-darwin-x64`
+- `transcribe-cli-v0.1.3-darwin-arm64`
+- `transcribe-cli-v0.1.3-windows-x64-baseline.exe`
 
 ### Local install
 
@@ -135,7 +135,7 @@ transcribe-cli transcribe meeting.wav \
 
 ### Long audio
 
-If the source is oversized, `batch` can create a speech-friendly working copy, split it, transcribe each chunk, and produce merged output plus a job manifest.
+If the source is oversized, `batch` can create a speech-friendly working copy, look for nearby silence boundaries, split the audio, carry forward previous transcript context where the model supports prompts, and produce merged output plus a job manifest.
 
 ```bash
 transcribe-cli batch long-meeting.m4a
@@ -145,6 +145,15 @@ Always chunk even when the file is already under the upload limit:
 
 ```bash
 transcribe-cli batch long-meeting.m4a --always-chunk --chunk-seconds 600
+```
+
+Tune the silence search if needed:
+
+```bash
+transcribe-cli batch long-meeting.m4a \
+  --boundary-window-seconds 30 \
+  --min-silence-seconds 0.5 \
+  --silence-threshold-db -35
 ```
 
 ### Translation

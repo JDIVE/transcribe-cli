@@ -1,6 +1,6 @@
 {
   "name": "transcribe-cli",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Provider-oriented audio transcription CLI with OpenAI support in v1.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",

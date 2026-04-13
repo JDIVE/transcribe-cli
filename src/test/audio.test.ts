@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildCarryoverPrompt,
   defaultResponseFormatForTranscribe,
   mergeBatchResults,
+  planChunkRanges,
   validateTranscriptionOptions,
 } from "../audio.js";
 import type { BatchChunkResult } from "../types.js";
@@ -75,4 +77,29 @@ test("mergeBatchResults shifts diarized segment timing", () => {
   assert.equal(segments.length, 2);
   assert.equal(segments[1]?.start, 3.25);
   assert.equal(segments[1]?.end, 4.75);
+});
+
+test("planChunkRanges prefers nearby silence boundaries", () => {
+  const ranges = planChunkRanges({
+    durationSeconds: 25,
+    targetSeconds: 10,
+    maxChunkSeconds: 14,
+    boundaryWindowSeconds: 3,
+    boundaries: [{ end: 11.8 }, { end: 20.9 }],
+    forceChunk: true,
+  });
+
+  assert.equal(ranges.length, 3);
+  assert.equal(ranges[0]?.endSeconds, 11.8);
+  assert.equal(ranges[1]?.startSeconds, 11.8);
+});
+
+test("buildCarryoverPrompt adds previous transcript context", () => {
+  const prompt = buildCarryoverPrompt({
+    model: "gpt-4o-mini-transcribe",
+    previousTranscript: "Earlier chunk text here.",
+  });
+
+  assert.match(prompt || "", /Earlier chunk text here/);
+  assert.match(prompt || "", /Continue this transcript smoothly/);
 });

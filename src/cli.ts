@@ -6,19 +6,28 @@ import { Command, Option } from "commander";
 
 import {
   ALL_RESPONSE_FORMATS,
+  buildCarryoverPrompt,
   collect,
   commandOnPath,
   createSpeechWorkingCopy,
+  DEFAULT_BATCH_CHUNK_SECONDS,
+  DEFAULT_BOUNDARY_WINDOW_SECONDS,
+  DEFAULT_MIN_SILENCE_SECONDS,
+  DEFAULT_SILENCE_THRESHOLD_DB,
   defaultResponseFormatForTranscribe,
   defaultResponseFormatForTranslate,
+  detectSilenceBoundaries,
   ensureAudioFiles,
+  estimateSafeChunkSeconds,
   expandHome,
+  extractAudioChunks,
   inspectAudio,
   MAX_AUDIO_BYTES,
   mergeBatchResults,
+  modelSupportsPrompt,
   parseKeyValuePair,
   parseNumberOption,
-  segmentAudio,
+  planChunkRanges,
   stringifyTranscriptData,
   validateResponseFormatForModel,
   validateTranscriptionOptions,
@@ -37,7 +46,7 @@ import type {
   TimestampGranularity,
 } from "./types.js";
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 
 const providers: Record<ProviderName, ProviderAdapter> = {
   openai: new OpenAIProvider(),
@@ -317,6 +326,10 @@ async function runBatchCommand(command: Command, audioPaths: string[]): Promise<
       workingDir?: string;
       chunkSeconds?: number;
       alwaysChunk?: boolean;
+      boundaryWindowSeconds?: number;
+      minSilenceSeconds?: number;
+      silenceThresholdDb?: number;
+      promptCarryover?: boolean;
       bitrate?: string;
       sampleRate?: number;
       dryRun?: boolean;
@@ -352,9 +365,15 @@ async function runBatchCommand(command: Command, audioPaths: string[]): Promise<
       );
       const outputsDir = join(jobDir, "chunks");
       const chunkOutputsDir = join(jobDir, "outputs");
-      const chunkSeconds = opts.chunkSeconds || 600;
+      const requestedChunkSeconds = opts.chunkSeconds || DEFAULT_BATCH_CHUNK_SECONDS;
       const sampleRate = opts.sampleRate || 22050;
       const bitrate = opts.bitrate || "64k";
+      const boundaryWindowSeconds = opts.boundaryWindowSeconds || DEFAULT_BOUNDARY_WINDOW_SECONDS;
+      const minSilenceSeconds = opts.minSilenceSeconds || DEFAULT_MIN_SILENCE_SECONDS;
+      const silenceThresholdDb = opts.silenceThresholdDb || DEFAULT_SILENCE_THRESHOLD_DB;
+      const promptCarryover =
+        opts.promptCarryover !== false && modelSupportsPrompt(audioOptions.model!);
+      const sourceNeedsSpeechCopy = sourceInspection.sizeBytes > MAX_AUDIO_BYTES;
 
       const plan = {
         sourcePath: audioPath,
@@ -362,9 +381,13 @@ async function runBatchCommand(command: Command, audioPaths: string[]): Promise<
         sourceSizeBytes: sourceInspection.sizeBytes,
         sourceDurationSeconds: sourceInspection.durationSeconds,
         sourceOverLimit: sourceInspection.sizeBytes > MAX_AUDIO_BYTES,
-        wouldCreateSpeechCopy: sourceInspection.sizeBytes > MAX_AUDIO_BYTES,
+        wouldCreateSpeechCopy: sourceNeedsSpeechCopy,
         wouldChunk: sourceInspection.sizeBytes > MAX_AUDIO_BYTES || Boolean(opts.alwaysChunk),
-        chunkSeconds,
+        requestedChunkSeconds,
+        boundaryWindowSeconds,
+        minSilenceSeconds,
+        silenceThresholdDb,
+        promptCarryover,
         responseFormat: audioOptions.responseFormat,
         model: audioOptions.model,
       };
@@ -382,7 +405,7 @@ async function runBatchCommand(command: Command, audioPaths: string[]): Promise<
       let workingPath = audioPath;
       let workingInspection = sourceInspection;
 
-      if (sourceInspection.sizeBytes > MAX_AUDIO_BYTES) {
+      if (sourceNeedsSpeechCopy) {
         workingPath = join(jobDir, "working-copy.mp3");
         await createSpeechWorkingCopy({
           sourcePath: audioPath,
@@ -394,24 +417,62 @@ async function runBatchCommand(command: Command, audioPaths: string[]): Promise<
       }
 
       let chunkPaths = [workingPath];
+      let chunkRanges = [
+        {
+          index: 0,
+          startSeconds: 0,
+          endSeconds: workingInspection.durationSeconds || 0,
+        },
+      ];
       if (workingInspection.sizeBytes > MAX_AUDIO_BYTES || opts.alwaysChunk) {
-        chunkPaths = await segmentAudio({
+        const safeChunkSeconds = estimateSafeChunkSeconds({
+          durationSeconds: workingInspection.durationSeconds,
+          sizeBytes: workingInspection.sizeBytes,
+          preferredSeconds: requestedChunkSeconds,
+        });
+        const silenceBoundaries = await detectSilenceBoundaries({
           sourcePath: workingPath,
+          thresholdDb: silenceThresholdDb,
+          minSilenceSeconds,
+        });
+        chunkRanges = planChunkRanges({
+          durationSeconds: workingInspection.durationSeconds || 0,
+          targetSeconds: safeChunkSeconds,
+          maxChunkSeconds:
+            workingInspection.sizeBytes > MAX_AUDIO_BYTES
+              ? safeChunkSeconds
+              : safeChunkSeconds + boundaryWindowSeconds,
+          boundaryWindowSeconds,
+          boundaries: silenceBoundaries,
+          forceChunk: Boolean(opts.alwaysChunk),
+        });
+        chunkPaths = await extractAudioChunks({
+          sourcePath: workingPath,
+          ranges: chunkRanges,
           outDir: outputsDir,
-          segmentSeconds: chunkSeconds,
+          sampleRate,
+          bitrate,
         });
       }
 
       const chunkResults: BatchChunkResult[] = [];
-      let offsetSeconds = 0;
+      let previousTranscript = "";
 
       for (const [index, chunkPath] of chunkPaths.entries()) {
         const chunkInspection = await inspectAudio(chunkPath);
+        const range = chunkRanges[index] || {
+          index,
+          startSeconds: 0,
+          endSeconds: chunkInspection.durationSeconds || 0,
+        };
         const result = await provider.transcribe({ config }, {
           ...audioOptions,
           audioPath: chunkPath,
-          outDir: undefined,
-          out: undefined,
+          prompt: buildCarryoverPrompt({
+            basePrompt: audioOptions.prompt,
+            previousTranscript: promptCarryover ? previousTranscript : undefined,
+            model: audioOptions.model!,
+          }),
         } as AudioCommandOptions);
         const outputPath = await writeTranscriptOutput({
           audioPath: chunkPath,
@@ -422,12 +483,12 @@ async function runBatchCommand(command: Command, audioPaths: string[]): Promise<
         chunkResults.push({
           index,
           path: chunkPath,
-          offsetSeconds,
+          offsetSeconds: range.startSeconds,
           durationSeconds: chunkInspection.durationSeconds,
           result,
           outputPath,
         });
-        offsetSeconds += chunkInspection.durationSeconds || 0;
+        previousTranscript = `${previousTranscript}\n${result.transcriptText}`.trim();
       }
 
       const merged = mergeBatchResults(chunkResults, audioOptions.responseFormat!);
@@ -451,7 +512,11 @@ async function runBatchCommand(command: Command, audioPaths: string[]): Promise<
             provider: providerName,
             source: sourceInspection,
             working: workingInspection,
-            chunk_seconds: chunkSeconds,
+            requested_chunk_seconds: requestedChunkSeconds,
+            boundary_window_seconds: boundaryWindowSeconds,
+            min_silence_seconds: minSilenceSeconds,
+            silence_threshold_db: silenceThresholdDb,
+            prompt_carryover: promptCarryover,
             response_format: audioOptions.responseFormat,
             model: audioOptions.model,
             chunks: chunkResults.map((chunk) => ({
@@ -695,6 +760,22 @@ async function main(): Promise<void> {
         parseNumberOption("chunk-seconds", value),
       )
       .option("--always-chunk", "Split the working copy even when it is already under 25 MB")
+      .option(
+        "--boundary-window-seconds <value>",
+        "How far around the target chunk length to look for silence",
+        (value) => parseNumberOption("boundary-window-seconds", value),
+      )
+      .option(
+        "--min-silence-seconds <value>",
+        "Minimum detected silence length for chunk boundaries",
+        (value) => parseNumberOption("min-silence-seconds", value),
+      )
+      .option(
+        "--silence-threshold-db <value>",
+        "Silence threshold in dB for ffmpeg silencedetect",
+        (value) => parseNumberOption("silence-threshold-db", value),
+      )
+      .option("--no-prompt-carryover", "Disable previous-segment transcript carryover prompts")
       .option("--bitrate <value>", "Speech-friendly MP3 bitrate when preprocessing")
       .option("--sample-rate <value>", "Speech-friendly sample rate when preprocessing", (value) =>
         parseNumberOption("sample-rate", value),

@@ -415,6 +415,7 @@ export async function segmentAudio(args: {
     throw new AppError("missing_ffmpeg", "ffmpeg is required to split audio into chunks.");
   }
   await mkdir(args.outDir, { recursive: true });
+  const extension = extname(args.sourcePath) || ".mp3";
   await runCommand("ffmpeg", [
     "-hide_banner",
     "-y",
@@ -426,7 +427,7 @@ export async function segmentAudio(args: {
     String(args.segmentSeconds),
     "-c",
     "copy",
-    join(args.outDir, "chunk-%03d.mp3"),
+    join(args.outDir, `chunk-%03d${extension}`),
   ]);
   const entries = await readdir(args.outDir);
   return entries

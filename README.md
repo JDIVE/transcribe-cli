@@ -41,11 +41,11 @@ Download the binary for your platform from GitHub Releases and put it on your `P
 
 Release assets are named like:
 
-- `transcribe-cli-v0.1.0-linux-x64-baseline`
-- `transcribe-cli-v0.1.0-linux-arm64`
-- `transcribe-cli-v0.1.0-darwin-x64`
-- `transcribe-cli-v0.1.0-darwin-arm64`
-- `transcribe-cli-v0.1.0-windows-x64-baseline.exe`
+- `transcribe-cli-v0.1.1-linux-x64-baseline`
+- `transcribe-cli-v0.1.1-linux-arm64`
+- `transcribe-cli-v0.1.1-darwin-x64`
+- `transcribe-cli-v0.1.1-darwin-arm64`
+- `transcribe-cli-v0.1.1-windows-x64-baseline.exe`
 
 ### Local install
 

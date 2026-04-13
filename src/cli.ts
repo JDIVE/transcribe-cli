@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 
-import { Command, Option } from "commander";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
+import { Command, Option } from "commander";
 
 import {
   ALL_RESPONSE_FORMATS,
-  MAX_AUDIO_BYTES,
   collect,
   commandOnPath,
   createSpeechWorkingCopy,
@@ -15,6 +14,7 @@ import {
   ensureAudioFiles,
   expandHome,
   inspectAudio,
+  MAX_AUDIO_BYTES,
   mergeBatchResults,
   parseKeyValuePair,
   parseNumberOption,
@@ -27,8 +27,8 @@ import {
 import { ensureConfigDir, loadResolvedConfig, writeStarterConfig } from "./config.js";
 import { AppError, toErrorPayload } from "./errors.js";
 import { printHuman, printJson, successEnvelope } from "./output.js";
-import { OpenAIProvider } from "./providers/openai.js";
 import type { ProviderAdapter } from "./providers/index.js";
+import { OpenAIProvider } from "./providers/openai.js";
 import type {
   AudioCommandOptions,
   BatchChunkResult,
@@ -37,7 +37,7 @@ import type {
   TimestampGranularity,
 } from "./types.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 const providers: Record<ProviderName, ProviderAdapter> = {
   openai: new OpenAIProvider(),

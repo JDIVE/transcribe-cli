@@ -4,7 +4,7 @@ import type {
   TranslationCreateParams,
 } from "openai/resources/audio";
 
-import { INPUT_FORMATS, MAX_AUDIO_BYTES, createFileStream, fileToDataUrl } from "../audio.js";
+import { createFileStream, fileToDataUrl, INPUT_FORMATS, MAX_AUDIO_BYTES } from "../audio.js";
 import { AppError } from "../errors.js";
 import type {
   AudioCommandOptions,

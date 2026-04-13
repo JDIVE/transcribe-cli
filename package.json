@@ -1,6 +1,6 @@
 {
   "name": "transcribe-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Provider-oriented audio transcription CLI with OpenAI support in v1.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -10,8 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "format": "biome format --write .",
-    "format:check": "biome format --check .",
+    "format": "biome check --write --linter-enabled=false .",
+    "format:check": "biome check --formatter-enabled=true --linter-enabled=false --assist-enabled=true --enforce-assist=true .",
     "lint": "biome lint .",
     "dev": "tsx src/cli.ts",
     "test": "tsx --test src/test/**/*.test.ts"

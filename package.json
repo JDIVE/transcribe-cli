@@ -1,0 +1,42 @@
+{
+  "name": "transcribe-cli",
+  "version": "0.1.0",
+  "description": "Provider-oriented audio transcription CLI with OpenAI support in v1.",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "bin": {
+    "transcribe-cli": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "format": "biome format --write .",
+    "format:check": "biome format --check .",
+    "lint": "biome lint .",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test src/test/**/*.test.ts"
+  },
+  "keywords": [
+    "audio",
+    "cli",
+    "openai",
+    "speech-to-text",
+    "transcription",
+    "translation"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "commander": "14.0.3",
+    "openai": "6.34.0",
+    "toml": "4.1.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.11",
+    "@types/node": "25.6.0",
+    "tsx": "4.21.0",
+    "typescript": "6.0.2"
+  }
+}
